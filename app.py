@@ -1,6 +1,7 @@
 from flask import Flask, redirect, session, request, jsonify
 from google_auth_oauthlib.flow import Flow
 import jwt
+from jwt import ExpiredSignatureError, InvalidTokenError
 from flask_cors import CORS
 from dotenv import load_dotenv
 import psycopg2
@@ -251,10 +252,58 @@ def send_email():
         return jsonify({"error": "Failed to send email", "details": str(e)}), 500
 
 
+
+def get_user_id_from_token(auth_token):
+    try:
+        decoded = jwt.decode(
+            auth_token,
+            SECRET_KEY,
+            algorithms=["HS256"]
+        )
+        return decoded.get("userId")
+
+    except ExpiredSignatureError:
+        raise Exception("Token has expired")
+
+    except InvalidTokenError:
+        raise Exception("Invalid token")
+
+
+
 @app.route('/bot-chat', methods=['GET'])
 def bot_chat():
+
     human_input = request.args.get("human_input", "")
+    auth_token = request.args.get("auth_token", "")
+    if not auth_token:
+        return jsonify({"error": "No authorization token provided"}), 400
     if not human_input:
         return jsonify({"error": "No data provided"}), 400
-    response = bot.respond(human_input)
-    return response
+
+    user_id = get_user_id_from_token(auth_token)
+
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+
+    cur.execute("""
+                INSERT INTO messages ("userId", role, content)
+                VALUES (%s, %s, %s) RETURNING id;
+                """, (user_id, "user", human_input))
+
+    conn.commit()
+
+    bot_response = bot.respond(human_input)
+
+    cur.execute("""
+                INSERT INTO messages ("userId", role, content)
+                VALUES (%s, %s, %s) RETURNING id;
+                """, (user_id, "bot", bot_response))
+
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+
+
+    return bot_response
