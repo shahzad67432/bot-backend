@@ -534,6 +534,36 @@ def send_email():
             userId='me',
             body={'raw': raw_message}
         ).execute()
+        # update the user details by adding the email details and deducct the credits
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor()
+        try:
+            # Deduct 1 credit
+            cur.execute("""
+                UPDATE "User" 
+                SET credits = credits - 1 
+                WHERE email = %s AND credits > 0
+                RETURNING credits;
+            """, (user_email,))
+
+            updated_credits = cur.fetchone()
+            if not updated_credits:
+                return jsonify({"error": "Insufficient credits"}), 402
+
+            # Save email history
+            cur.execute("""
+                INSERT INTO "EmailHistory" 
+                ("userId", "receiverEmail", "receiverName", "emailType", status)
+                VALUES (
+                    (SELECT id FROM "User" WHERE email = %s),
+                    %s, %s, %s, 'sent'
+                );
+            """, (user_email, receiver_email, teacher['name'], email_type))
+
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
         return jsonify({
             "status": "success",
             "message_id": sent['id'],
