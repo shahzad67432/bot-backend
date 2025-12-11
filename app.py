@@ -65,7 +65,7 @@ TEACHERS = [
 
 # ==================== KEYWORD CATEGORIES ====================
 ILLNESS_KEYWORDS = ['ill', 'sick', 'unwell', 'fever', 'not feeling well', 'health issue', 'medical', 'disease', 'pain']
-LEAVE_KEYWORDS = ['leave', 'absent', 'cannot come', "can't come", "won't come", "won't attend", 'miss class', "can't attend", 'unable to attend']
+LEAVE_KEYWORDS = ['leave', 'absent', 'cannot come', "can't come", "won't come", "won't attend", 'miss class', "can't attend", 'unable to attend', 'might not be able to come', 'I will not come', 'will not come', 'might not attend', 'might not be able to attend']
 URGENT_KEYWORDS = ['urgent', 'important', 'emergency', 'immediately', 'asap', 'critical', 'pressing']
 
 # ==================== EMAIL TEMPLATES ====================
