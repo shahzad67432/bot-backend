@@ -4,7 +4,6 @@ import jwt
 from jwt import ExpiredSignatureError, InvalidTokenError
 from flask_cors import CORS
 from dotenv import load_dotenv
-import psycopg2
 import os
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -14,16 +13,23 @@ import aiml
 import glob
 from difflib import SequenceMatcher
 from cryptography.fernet import Fernet
+from neo4j import GraphDatabase
+
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
 key = os.environ.get("FLASK_ENCRYPTION_KEY").encode()
 print(key)
 cipher_suite = Fernet(key)
 
+# Setup the Neo4j database connection
+neo4j_uri = "neo4j://127.0.0.1:7687"
+neo4j_user = "neo4j"
+neo4j_password = '11223344'
+driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
 
 app = Flask(__name__)
-app.secret_key= "flask-secretkey123"
-CORS(app, supports_credentials=True, origins=["http://localhost:3000"])
+app.secret_key = "flask-secretkey123"
+CORS(app, supports_credentials=True, origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"])
 scopes = [
     'https://www.googleapis.com/auth/gmail.send',
     'openid',
@@ -37,18 +43,16 @@ CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 BASE_URL = os.getenv("BASE_URL")
 NEXT_API_URL = "http://localhost:3000"
-SECRET_KEY="secretkey123"
-DB_URL = os.getenv("DATABASE_URL")
+SECRET_KEY = "secretkey123"
 
 bot = aiml.Kernel()
 aiml_files = glob.glob("./folder/data/*.aiml")
 
+bot.setBotPredicate("master", "NE-TEAM")
 bot.setBotPredicate("name", "Neural Mail Assistant")
-bot.setBotPredicate("master", "Neural Mail Assistant")
 
 for file in aiml_files:
     bot.learn(file)
-
 
 TEACHERS = [
     {"name": "Dr. Ashfaq Ahmad", "email": "ashfaqahmad@umt.edu.pk"},
@@ -65,7 +69,9 @@ TEACHERS = [
 
 # ==================== KEYWORD CATEGORIES ====================
 ILLNESS_KEYWORDS = ['ill', 'sick', 'unwell', 'fever', 'not feeling well', 'health issue', 'medical', 'disease', 'pain']
-LEAVE_KEYWORDS = ['leave', 'absent', 'cannot come', "can't come", "won't come", "won't attend", 'miss class', "can't attend", 'unable to attend', 'might not be able to come', 'I will not come', 'will not come', 'might not attend', 'might not be able to attend']
+LEAVE_KEYWORDS = ['leave', 'absent', 'cannot come', "can't come", "won't come", "won't attend", 'miss class',
+                  "can't attend", 'unable to attend', 'might not be able to come', 'I will not come', 'will not come',
+                  'might not attend', 'might not be able to attend']
 URGENT_KEYWORDS = ['urgent', 'important', 'emergency', 'immediately', 'asap', 'critical', 'pressing']
 
 # ==================== EMAIL TEMPLATES ====================
@@ -129,15 +135,16 @@ Best regards,
 }
 
 
-
-#flask working fine
+# flask working fine
 @app.route("/")
 def index():
     print("hello")
     return "<h2>Backend Working...</h2>"
+
+
 # ----------------
-# route to  start the OauthConsent
-@app.route('/oAuth-consent', methods=['POST', 'GET']) #get the email, from frontend
+# route to start the OauthConsent
+@app.route('/oAuth-consent', methods=['POST', 'GET'])
 def oauth_consent():
     token = request.args.get("token")
 
@@ -145,7 +152,6 @@ def oauth_consent():
         return jsonify({"error": "Token required"}), 400
 
     try:
-        # ✅ Verify the JWT token (same secret used in Next.js)
         decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         email = decoded.get("email")
         print("email:", email)
@@ -179,39 +185,31 @@ def oauth_consent():
 
 
 def store_gmail_credentials(email, data):
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    """Store Gmail OAuth credentials in Neo4j."""
+    neo4j_session = driver.session()
 
     try:
-        # Insert or update in one transaction
-        cur.execute("""
-            INSERT INTO "UserOAuth" (token, refresh_token, expiry, scopes, "userId")
-            VALUES (
-                %(token)s, %(refresh_token)s, %(expiry)s, %(scopes)s,
-                (SELECT id FROM "User" WHERE email = %(email)s)
-            )
-            ON CONFLICT ("userId") DO UPDATE SET
-                token = EXCLUDED.token,
-                refresh_token = EXCLUDED.refresh_token,
-                expiry = EXCLUDED.expiry,
-                scopes = EXCLUDED.scopes;
+        neo4j_session.run("""
+            MERGE (u:User {email: $email})
+            SET u.token = $token,
+                u.refresh_token = $refresh_token,
+                u.expiry = $expiry,
+                u.scopes = $scopes
         """, {
+            "email": email,
             "token": data["token"],
             "refresh_token": data["refresh_token"],
             "expiry": data["expiry"],
-            "scopes": data["scopes"] if isinstance(data["scopes"], list) else [data["scopes"]],
-            "email": email
+            "scopes": ','.join(data["scopes"])
         })
-
-        conn.commit()
+    except Exception as e:
+        print(f"Error storing credentials: {e}")
     finally:
-        cur.close()
-        conn.close()
+        neo4j_session.close()
+
+
 @app.route('/oauth2callback')
 def oauth2callback():
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
-
     state = session.get("state")
     email = session.get("email")
     if not email:
@@ -242,94 +240,12 @@ def oauth2callback():
     }
     data["token"] = cipher_suite.encrypt(data["token"].encode()).decode()
     data["refresh_token"] = cipher_suite.encrypt(data["refresh_token"].encode()).decode()
+
     try:
         store_gmail_credentials(email, data)
         return redirect(f"{NEXT_API_URL}?connected=gmail")
     except Exception as e:
         return jsonify({"error": "Failed to store Gmail data", "details": str(e)}), 500
-
-
-# @app.route('/send-email', methods=['POST', 'GET'])
-# def send_email():
-#     data = request.get_json()  # <- get JSON body
-#     if not data:
-#         return jsonify({"error": "No data provided"}), 400
-#
-#     token = data.get("token")
-#     speech = data.get("speechText")
-#     receiver_email = 'f2023376234@umt.edu.pk'
-#
-#     if not token:
-#         return jsonify({"error": "Token required"}), 400
-#
-#     try:
-#         decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-#         user_email = decoded.get("email")
-#     except jwt.ExpiredSignatureError:
-#         return jsonify({"error": "Token expired"}), 401
-#     except jwt.InvalidTokenError:
-#         return jsonify({"error": "Invalid token"}), 401
-#
-#     conn = psycopg2.connect(DB_URL)
-#     cur = conn.cursor()
-#     try:
-#         cur.execute("""
-#                     SELECT token, refresh_token, expiry
-#                     FROM "UserOAuth"
-#                     WHERE "userId" = (SELECT id FROM "User" WHERE email = %s)
-#                     """, (user_email,))
-#         row = cur.fetchone()
-#         if not row:
-#             return jsonify({"error": "No OAuth credentials found for this user"}), 404
-#
-#         access_token, refresh_token, expiry = row
-#     finally:
-#         cur.close()
-#         conn.close()
-#
-#     if user_email == "shaa1891640@gmail.com":
-#         access_token = cipher_suite.encrypt(access_token.encode()).decode()
-#         refresh_token = cipher_suite.encrypt(refresh_token.encode()).decode()
-#
-#     decrypted_access_token = cipher_suite.decrypt(access_token.encode()).decode()
-#     decrypted_refresh_token = cipher_suite.decrypt(refresh_token.encode()).decode()
-#
-#     # Build credentials object
-#     creds = Credentials(
-#         token=decrypted_access_token,
-#         refresh_token=decrypted_refresh_token,
-#         token_uri="https://oauth2.googleapis.com/token",
-#         client_id=CLIENT_ID,
-#         client_secret=CLIENT_SECRET
-#     )
-#
-#     service = build('gmail', 'v1', credentials=creds)
-#
-#     html_body = f"""
-#         <html>
-#           <body>
-#             <h2>Message from Your App</h2>
-#             <p>{speech}</p>
-#             <hr>
-#             <p>Sent via Your Email Assistant using Gmail API and AIML Bot</p>
-#           </body>
-#         </html>
-#     """
-#     message = MIMEText(html_body, "html")
-#     message['to'] = receiver_email
-#     message['from'] = user_email
-#     message['subject'] = "Message from your Muhammad Shahzad's Email Assistant"
-#
-#     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-#
-#     try:
-#         sent = service.users().messages().send(
-#             userId='me',
-#             body={'raw': raw_message}
-#         ).execute()
-#         return jsonify({"status": "success", "message_id": sent['id']})
-#     except Exception as e:
-#         return jsonify({"error": "Failed to send email", "details": str(e)}), 500
 
 
 def similarity_score(str1, str2):
@@ -344,22 +260,19 @@ def find_teacher(text):
     best_score = 0
 
     for teacher in TEACHERS:
-        # Check full name
         score = similarity_score(teacher['name'], text)
         if score > best_score:
             best_score = score
             best_match = teacher
 
-        # Check parts of name (Dr., Prof., first name, last name)
         name_parts = teacher['name'].lower().split()
         for part in name_parts:
             if len(part) > 2 and part in text_lower:
-                score = 0.8  # High score for partial match
+                score = 0.8
                 if score > best_score:
                     best_score = score
                     best_match = teacher
 
-    # Return match if confidence is high enough
     if best_score > 0.6:
         return best_match
     return None
@@ -369,16 +282,10 @@ def detect_email_type(text):
     """Detect email type from text based on keywords"""
     text_lower = text.lower()
 
-    # Check for illness keywords
     has_illness = any(keyword in text_lower for keyword in ILLNESS_KEYWORDS)
-
-    # Check for leave keywords
     has_leave = any(keyword in text_lower for keyword in LEAVE_KEYWORDS)
-
-    # Check for urgent keywords
     has_urgent = any(keyword in text_lower for keyword in URGENT_KEYWORDS)
 
-    # Decision logic
     if has_illness and has_leave:
         return 'sick_leave'
     elif has_leave:
@@ -391,15 +298,96 @@ def detect_email_type(text):
 
 def get_student_name(email):
     """Extract student name from email (simple extraction)"""
-    # Extract name before @ symbol
     name_part = email.split('@')[0]
-    # Replace dots/underscores with spaces and capitalize
     name = name_part.replace('.', ' ').replace('_', ' ').title()
     return name
 
 
-# ==================== UPDATED SEND EMAIL ROUTE ====================
+def get_user_credentials_from_neo4j(user_email):
+    """Retrieve OAuth credentials from Neo4j."""
+    neo4j_session = driver.session()
+    try:
+        result = neo4j_session.run("""
+            MATCH (u:User {email: $email})
+            RETURN u.token AS token, u.refresh_token AS refresh_token, u.expiry AS expiry
+        """, {"email": user_email})
 
+        record = result.single()
+        if not record:
+            return None
+
+        return {
+            "token": record["token"],
+            "refresh_token": record["refresh_token"],
+            "expiry": record["expiry"]
+        }
+    finally:
+        neo4j_session.close()
+
+
+def get_user_credits(user_email):
+    """Get user credits from Neo4j."""
+    neo4j_session = driver.session()
+    try:
+        result = neo4j_session.run("""
+            MATCH (u:User {email: $email})
+            RETURN u.credits AS credits
+        """, {"email": user_email})
+
+        record = result.single()
+        if not record or record["credits"] is None:
+            # Initialize credits if not set
+            neo4j_session.run("""
+                MATCH (u:User {email: $email})
+                SET u.credits = 10
+            """, {"email": user_email})
+            return 10
+
+        return record["credits"]
+    finally:
+        neo4j_session.close()
+
+
+def deduct_credit_and_save_history(user_email, receiver_email, teacher_name, email_type):
+    """Deduct credit and save email history in Neo4j."""
+    neo4j_session = driver.session()
+    try:
+        # Deduct credit
+        result = neo4j_session.run("""
+            MATCH (u:User {email: $email})
+            WHERE u.credits > 0
+            SET u.credits = u.credits - 1
+            RETURN u.credits AS credits
+        """, {"email": user_email})
+
+        record = result.single()
+        if not record:
+            return None
+
+        # Save email history
+        neo4j_session.run("""
+            MATCH (u:User {email: $email})
+            CREATE (e:EmailHistory {
+                receiverEmail: $receiver_email,
+                receiverName: $receiver_name,
+                emailType: $email_type,
+                status: 'sent',
+                timestamp: datetime()
+            })
+            CREATE (u)-[:SENT]->(e)
+        """, {
+            "email": user_email,
+            "receiver_email": receiver_email,
+            "receiver_name": teacher_name,
+            "email_type": email_type
+        })
+
+        return record["credits"]
+    finally:
+        neo4j_session.close()
+
+
+# ==================== UPDATED SEND EMAIL ROUTE ====================
 @app.route('/send-email', methods=['POST', 'GET'])
 def send_email():
     data = request.get_json()
@@ -415,7 +403,6 @@ def send_email():
     if not speech:
         return jsonify({"error": "Speech text required"}), 400
 
-    # Decode JWT to get user email
     try:
         decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         user_email = decoded.get("email")
@@ -423,8 +410,6 @@ def send_email():
         return jsonify({"error": "Token expired"}), 401
     except jwt.InvalidTokenError:
         return jsonify({"error": "Invalid token"}), 401
-
-    # ==================== NEW LOGIC ====================
 
     # 1. Find teacher from speech text
     teacher = find_teacher(speech)
@@ -466,27 +451,15 @@ def send_email():
 
     receiver_email = teacher['email']
 
-    # ==================== EXISTING GMAIL API CODE ====================
+    # Get OAuth credentials from Neo4j
+    credentials_data = get_user_credentials_from_neo4j(user_email)
+    if not credentials_data:
+        return jsonify({"error": "No OAuth credentials found for this user"}), 404
 
-    # Get OAuth credentials from database
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
-    try:
-        cur.execute("""
-                    SELECT token, refresh_token, expiry
-                    FROM "UserOAuth"
-                    WHERE "userId" = (SELECT id FROM "User" WHERE email = %s)
-                    """, (user_email,))
-        row = cur.fetchone()
-        if not row:
-            return jsonify({"error": "No OAuth credentials found for this user"}), 404
+    access_token = credentials_data["token"]
+    refresh_token = credentials_data["refresh_token"]
 
-        access_token, refresh_token, expiry = row
-    finally:
-        cur.close()
-        conn.close()
-
-    # Handle encryption (your existing logic)
+    # Handle encryption
     if user_email == "shaa1891640@gmail.com":
         access_token = cipher_suite.encrypt(access_token.encode()).decode()
         refresh_token = cipher_suite.encrypt(refresh_token.encode()).decode()
@@ -534,36 +507,15 @@ def send_email():
             userId='me',
             body={'raw': raw_message}
         ).execute()
-        # update the user details by adding the email details and deducct the credits
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        try:
-            # Deduct 1 credit
-            cur.execute("""
-                UPDATE "User" 
-                SET credits = credits - 1 
-                WHERE email = %s AND credits > 0
-                RETURNING credits;
-            """, (user_email,))
 
-            updated_credits = cur.fetchone()
-            if not updated_credits:
-                return jsonify({"error": "Insufficient credits"}), 402
+        # Deduct credit and save history
+        updated_credits = deduct_credit_and_save_history(
+            user_email, receiver_email, teacher['name'], email_type
+        )
 
-            # Save email history
-            cur.execute("""
-                INSERT INTO "EmailHistory" 
-                ("userId", "receiverEmail", "receiverName", "emailType", status)
-                VALUES (
-                    (SELECT id FROM "User" WHERE email = %s),
-                    %s, %s, %s, 'sent'
-                );
-            """, (user_email, receiver_email, teacher['name'], email_type))
+        if updated_credits is None:
+            return jsonify({"error": "Insufficient credits"}), 402
 
-            conn.commit()
-        finally:
-            cur.close()
-            conn.close()
         return jsonify({
             "status": "success",
             "message_id": sent['id'],
@@ -585,10 +537,8 @@ def get_user_id_from_token(auth_token):
             algorithms=["HS256"]
         )
         return decoded.get("userId")
-
     except ExpiredSignatureError:
         raise Exception("Token has expired")
-
     except InvalidTokenError:
         raise Exception("Invalid token")
 
@@ -596,9 +546,11 @@ def get_user_id_from_token(auth_token):
 
 @app.route('/bot-chat', methods=['GET'])
 def bot_chat():
-
     human_input = request.args.get("human_input", "")
+    email = request.args.get("email", "")
+    name = request.args.get("name", "")
     auth_token = request.args.get("auth_token", "")
+
     if not auth_token:
         return jsonify({"error": "No authorization token provided"}), 400
     if not human_input:
@@ -606,28 +558,67 @@ def bot_chat():
 
     user_id = get_user_id_from_token(auth_token)
 
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
+    user_message = create_message(user_id, "user", human_input)
 
-    cur.execute("""
-                INSERT INTO messages ("userId", role, content)
-                VALUES (%s, %s, %s) RETURNING id;
-                """, (user_id, "user", human_input))
-
-    conn.commit()
+    bot.setPredicate("name", name)
+    bot.setPredicate("lastname", name)
+    bot.setPredicate("firstname", name)
+    bot.setPredicate("email", email)
 
     bot_response = bot.respond(human_input)
 
-    cur.execute("""
-                INSERT INTO messages ("userId", role, content)
-                VALUES (%s, %s, %s) RETURNING id;
-                """, (user_id, "bot", bot_response))
+    bot_message = create_message(user_id, "bot", bot_response)
+    if not bot_message:
+        print("Warning: Failed to save bot message to database")
 
-    conn.commit()
+    return jsonify({
+        "content": bot_response,
+        "userMessage": human_input,
+        "botMessage": bot_message
+    })
 
-    cur.close()
-    conn.close()
 
+def create_message(user_id, role, content):
+    """Create a new Message node and link it to User in Neo4j."""
+    neo4j_session = driver.session()
+    try:
+        result = neo4j_session.run("""
+            MATCH (u:User {id: $userId})
+            CREATE (m:Message {
+                id: randomUUID(),
+                role: $role,
+                content: $content,
+                createdAt: datetime(),
+                userId: $userId
+            })
+            CREATE (u)-[:SENT_MESSAGE]->(m)
+            RETURN m.id AS id, 
+                   m.userId AS userId, 
+                   m.role AS role, 
+                   m.content AS content, 
+                   m.createdAt AS createdAt
+        """, {
+            "userId": user_id,
+            "role": role,
+            "content": content
+        })
 
+        record = result.single()
+        if not record:
+            return None
 
-    return bot_response
+        return {
+            "id": record["id"],
+            "userId": record["userId"],
+            "role": record["role"],
+            "content": record["content"],
+            "createdAt": record["createdAt"].iso_format() if record["createdAt"] else None
+        }
+    except Exception as e:
+        print(f"Error creating message: {e}")
+        return None
+    finally:
+        neo4j_session.close()
+
+if __name__ == '__main__':
+    app.run(debug=True)
